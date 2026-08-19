@@ -83,8 +83,4 @@ export const COLORS = {
   track: "#242424",
   zone: "#5A5A5A",
   dim: "#8A8A8A",
-};  strain: "#0093E7",
-  track: "#242424",
-  zone: "#5A5A5A",
-  dim: "#8A8A8A",
 };

@@ -33,6 +33,21 @@ function fmtDate(iso: string | null) {
   return `${m}/${d}/${y}`;
 }
 
+// lastSync is either a full ISO timestamp (real clock time, from the latest
+// zone-minute record) or a bare YYYY-MM-DD (fallback, date only — no time
+// data was available). Format each appropriately.
+function fmtSync(v: string | null) {
+  if (!v) return "";
+  if (v.includes("T")) {
+    const d = new Date(v);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return sameDay ? `Last synced ${time}` : `Last synced ${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+  }
+  return `Last synced ${fmtDate(v)} (exact time unavailable)`;
+}
+
 export default function Page() {
   const [data, setData] = useState<{ demo: boolean; days: Day[]; debug?: Debug; lastSync?: string | null; baselines?: Baselines } | null>(null);
   const [err, setErr] = useState(false);
@@ -42,14 +57,21 @@ export default function Page() {
   const [showDebug, setShowDebug] = useState(false);
   const [detail, setDetail] = useState<MetricKey | null>(null);
 
-  const load = () => {
-    setLoading(true); setErr(false);
+  const load = (silent = false) => {
+    if (!silent) setLoading(true);
+    setErr(false);
     fetch("/api/summary", { cache: "no-store" })
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false); })
       .catch(() => { setErr(true); setLoading(false); });
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    // Auto-refresh so steps/strain/sync-time stay current without a manual
+    // tap. Silent = no loading spinner, so it doesn't flicker mid-read.
+    const id = setInterval(() => load(true), 5 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const today = data?.days.at(-1);
   const windowDays = useMemo(() => (data ? data.days.slice(-range) : []), [data, range]);
@@ -62,12 +84,12 @@ export default function Page() {
         <div>
           <h1>{OWNER.toUpperCase()}'S FITBIT AIR</h1>
           <div className="synced mono">
-            {data?.lastSync ? `Last synced ${fmtDate(data.lastSync)}` : loading ? "Syncing…" : ""}
+            {data?.lastSync ? fmtSync(data.lastSync) : loading ? "Syncing…" : ""}
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span className="date mono">{today?.date ?? ""}</span>
-          <button className="refreshBtn" onClick={load} disabled={loading} aria-label="Refresh data">
+          <button className="refreshBtn" onClick={() => load()} disabled={loading} aria-label="Refresh data">
             {loading ? "…" : "REFRESH"}
           </button>
         </div>

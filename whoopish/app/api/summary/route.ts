@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRefreshToken, refreshAccessToken } from "@/lib/google";
-import { fetchDays } from "@/lib/health";
+import { fetchDays, type Diag } from "@/lib/health";
 import { scoreDays } from "@/lib/scoring";
 import { demoDays } from "@/lib/demo";
 
@@ -14,9 +14,13 @@ export async function GET(req: NextRequest) {
   start.setUTCDate(start.getUTCDate() - (FETCH_DAYS - 1));
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
 
+  const debug: any = { hasRefreshToken: false, tokenRefreshError: null, diag: [] as Diag[] };
+
   const rt = await getRefreshToken();
+  debug.hasRefreshToken = !!rt;
   let demo = false;
   let days;
+
   if (rt) {
     try {
       const token = await refreshAccessToken(rt);
@@ -29,8 +33,10 @@ export async function GET(req: NextRequest) {
         fetchDays(token, fmt(start), fmt(mid)),
         fetchDays(token, fmt(midNext), fmt(end)),
       ]);
-      days = [...a, ...b];
-    } catch (e) {
+      days = [...a.days, ...b.days];
+      debug.diag = [...a.diag, ...b.diag];
+    } catch (e: any) {
+      debug.tokenRefreshError = String(e?.message || e);
       console.error("Falling back to demo data:", e);
     }
   }
@@ -40,5 +46,9 @@ export async function GET(req: NextRequest) {
   }
 
   const scored = scoreDays(days).slice(-90); // drop warm-up
-  return NextResponse.json({ demo, days: scored });
+  debug.lastRawDay = days.at(-1); // unscored, straight from the API — easiest thing to eyeball
+  debug.failedCalls = debug.diag.filter((d: Diag) => !d.ok).length;
+  debug.totalCalls = debug.diag.length;
+
+  return NextResponse.json({ demo, days: scored, debug });
 }

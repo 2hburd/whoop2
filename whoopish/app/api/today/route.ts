@@ -20,7 +20,8 @@ export async function GET(req: NextRequest) {
   let days;
   if (rt) {
     try {
-      days = await fetchDays(await refreshAccessToken(rt), fmt(start), fmt(end));
+      const result = await fetchDays(await refreshAccessToken(rt), fmt(start), fmt(end));
+      days = result.days;
     } catch (e) {
       console.error(e);
     }

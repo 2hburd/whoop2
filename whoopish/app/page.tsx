@@ -15,35 +15,65 @@ type Day = {
   strain: number; target: { goal: number; low: number; high: number };
 };
 
+type Debug = {
+  hasRefreshToken: boolean;
+  tokenRefreshError: string | null;
+  diag: { path: string; status: number; ok: boolean; message: string }[];
+  failedCalls: number;
+  totalCalls: number;
+  lastRawDay: unknown;
+};
+
 const recColor = (p: number | null) =>
   p == null ? "#555" : p >= 67 ? "var(--green)" : p >= 34 ? "var(--yellow)" : "var(--red)";
 const hm = (min: number | null) =>
   min == null ? "—" : `${Math.floor(min / 60)}h ${String(Math.round(min % 60)).padStart(2, "0")}m`;
 
 export default function Page() {
-  const [data, setData] = useState<{ demo: boolean; days: Day[] } | null>(null);
+  const [data, setData] = useState<{ demo: boolean; days: Day[]; debug?: Debug } | null>(null);
   const [err, setErr] = useState(false);
   const [tab, setTab] = useState<"today" | "trends" | "history">("today");
   const [range, setRange] = useState(30);
+  const [loading, setLoading] = useState(true);
+  const [showDebug, setShowDebug] = useState(false);
 
-  useEffect(() => {
-    fetch("/api/summary")
+  const load = () => {
+    setLoading(true);
+    setErr(false);
+    fetch("/api/summary", { cache: "no-store" })
       .then(r => r.json())
-      .then(setData)
-      .catch(() => setErr(true));
-  }, []);
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => { setErr(true); setLoading(false); });
+  };
+
+  useEffect(() => { load(); }, []);
 
   const today = data?.days.at(-1);
   const windowDays = useMemo(() => (data ? data.days.slice(-range) : []), [data, range]);
+  const hasIssues = !!data?.debug && (data.debug.failedCalls > 0 || !!data.debug.tokenRefreshError || (!data.demo && !data.debug.hasRefreshToken));
 
   return (
     <main className="shell">
       <header className="top">
         <h1>RECOVERY</h1>
-        <span className="date mono">{today?.date ?? ""}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span className="date mono">{today?.date ?? ""}</span>
+          <button
+            onClick={load}
+            disabled={loading}
+            aria-label="Refresh data"
+            style={{
+              background: "none", border: "1px solid var(--line)", borderRadius: 8,
+              color: "var(--dim)", fontSize: 11, letterSpacing: "0.08em", fontWeight: 600,
+              padding: "5px 10px", cursor: loading ? "default" : "pointer",
+            }}
+          >
+            {loading ? "…" : "REFRESH"}
+          </button>
+        </div>
       </header>
 
-      {err && <div className="banner">Couldn't load data. Pull to refresh or try again shortly.</div>}
+      {err && <div className="banner">Couldn't load data. <a href="#" onClick={(e) => { e.preventDefault(); load(); }}>Try again</a>.</div>}
       {data?.demo && (
         <div className="banner">
           <span>Showing demo data — connect your Google account to see your own.</span>
@@ -52,6 +82,34 @@ export default function Page() {
       )}
 
       {!data && !err && <div className="banner">Loading…</div>}
+
+      {data?.debug && (
+        <div className="banner" style={{ flexDirection: "column", alignItems: "flex-start", gap: 6 }}>
+          <div style={{ display: "flex", width: "100%", justifyContent: "space-between" }}>
+            <span style={{ color: hasIssues ? "var(--red)" : "var(--dim)" }}>
+              {hasIssues ? "⚠ Data issues detected" : "✓ No issues detected"} — {data.debug.totalCalls - data.debug.failedCalls}/{data.debug.totalCalls} API calls OK
+            </span>
+            <a href="#" onClick={(e) => { e.preventDefault(); setShowDebug(s => !s); }}>
+              {showDebug ? "Hide debug" : "Show debug"}
+            </a>
+          </div>
+          {showDebug && (
+            <pre className="mono" style={{
+              fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word",
+              maxHeight: 320, overflowY: "auto", width: "100%", color: "#ccc",
+              background: "#000", padding: 10, borderRadius: 8, marginTop: 4,
+            }}>
+{JSON.stringify({
+  demo: data.demo,
+  hasRefreshToken: data.debug.hasRefreshToken,
+  tokenRefreshError: data.debug.tokenRefreshError,
+  failedCalls: data.debug.diag.filter(d => !d.ok),
+  lastRawDay: data.debug.lastRawDay,
+}, null, 2)}
+            </pre>
+          )}
+        </div>
+      )}
 
       {today && (
         <>

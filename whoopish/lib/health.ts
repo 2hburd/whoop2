@@ -27,28 +27,43 @@ function civil(dateStr: string, end = false) {
   };
 }
 
-async function api(token: string, path: string, body?: unknown) {
-  const res = await fetch(`${BASE}${path}`, {
-    method: body ? "POST" : "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    // Tolerate unknown data types / gaps rather than failing the whole page.
-    console.warn(`Health API ${path} -> ${res.status}: ${(await res.text()).slice(0, 300)}`);
+export interface Diag {
+  path: string;
+  status: number;
+  ok: boolean;
+  message: string;
+}
+
+async function api(token: string, path: string, diag: Diag[], body?: unknown) {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method: body ? "POST" : "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e: any) {
+    diag.push({ path, status: 0, ok: false, message: `network error: ${e?.message || e}` });
     return null;
   }
+  if (!res.ok) {
+    const text = (await res.text()).slice(0, 400);
+    diag.push({ path, status: res.status, ok: false, message: text });
+    // Tolerate unknown data types / gaps rather than failing the whole page.
+    return null;
+  }
+  diag.push({ path, status: res.status, ok: true, message: "ok" });
   return res.json();
 }
 
 // Daily rollups for one data type across [start, end] (inclusive, <=90 days).
 // Returns map of date -> raw metric object for that day.
-async function dailyRollup(token: string, type: string, start: string, end: string) {
-  const j = await api(token, `/users/me/dataTypes/${type}/dataPoints:dailyRollUp`, {
+async function dailyRollup(token: string, type: string, start: string, end: string, diag: Diag[]) {
+  const j = await api(token, `/users/me/dataTypes/${type}/dataPoints:dailyRollUp`, diag, {
     range: { start: civil(start), end: civil(end, true) },
     windowSizeDays: 1,
   });
@@ -77,7 +92,7 @@ function firstNum(obj: any, names: string[]): number | null {
 }
 
 // Sleep sessions via reconcile (page cap 25 -> paginate).
-async function fetchSleep(token: string, start: string, end: string) {
+async function fetchSleep(token: string, start: string, end: string, diag: Diag[]) {
   const byDate: Record<string, { min: number; stages: DayMetrics["sleepStages"] }> = {};
   let pageToken = "";
   for (let i = 0; i < 8; i++) {
@@ -85,7 +100,7 @@ async function fetchSleep(token: string, start: string, end: string) {
       filter: `sleep.interval.civil_end_time >= "${start}" AND sleep.interval.civil_end_time <= "${end}T23:59:59"`,
     });
     if (pageToken) q.set("pageToken", pageToken);
-    const j = await api(token, `/users/me/dataTypes/${DATA_TYPES.sleep}/dataPoints:reconcile?${q}`);
+    const j = await api(token, `/users/me/dataTypes/${DATA_TYPES.sleep}/dataPoints:reconcile?${q}`, diag);
     if (!j) break;
     for (const p of j.dataPoints || []) {
       const s = p.sleep;
@@ -108,16 +123,17 @@ async function fetchSleep(token: string, start: string, end: string) {
   return byDate;
 }
 
-export async function fetchDays(token: string, start: string, end: string): Promise<DayMetrics[]> {
+export async function fetchDays(token: string, start: string, end: string): Promise<{ days: DayMetrics[]; diag: Diag[] }> {
+  const diag: Diag[] = [];
   const [sleep, hrv, rhr, resp, spo2, steps, cals, azm] = await Promise.all([
-    fetchSleep(token, start, end),
-    dailyRollup(token, DATA_TYPES.hrv, start, end),
-    dailyRollup(token, DATA_TYPES.restingHeartRate, start, end),
-    dailyRollup(token, DATA_TYPES.breathingRate, start, end),
-    dailyRollup(token, DATA_TYPES.spo2, start, end),
-    dailyRollup(token, DATA_TYPES.steps, start, end),
-    dailyRollup(token, DATA_TYPES.calories, start, end),
-    dailyRollup(token, DATA_TYPES.activeMinutes, start, end),
+    fetchSleep(token, start, end, diag),
+    dailyRollup(token, DATA_TYPES.hrv, start, end, diag),
+    dailyRollup(token, DATA_TYPES.restingHeartRate, start, end, diag),
+    dailyRollup(token, DATA_TYPES.breathingRate, start, end, diag),
+    dailyRollup(token, DATA_TYPES.spo2, start, end, diag),
+    dailyRollup(token, DATA_TYPES.steps, start, end, diag),
+    dailyRollup(token, DATA_TYPES.calories, start, end, diag),
+    dailyRollup(token, DATA_TYPES.activeMinutes, start, end, diag),
   ]);
 
   const days: DayMetrics[] = [];
@@ -141,5 +157,5 @@ export async function fetchDays(token: string, start: string, end: string): Prom
       azm: a ? { fatBurn, cardio, peak, total } : null,
     });
   }
-  return days;
+  return { days, diag };
 }

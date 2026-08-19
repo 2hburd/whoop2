@@ -37,6 +37,8 @@ export async function GET(req: NextRequest) {
       ]);
       days = [...a.days, ...b.days];
       debug.diag = [...a.diag, ...b.diag];
+      // b covers the more recent half of the range, so its sync time wins if present.
+      var lastSyncTime: string | null = b.lastSyncTime || a.lastSyncTime;
     } catch (e: any) {
       debug.tokenRefreshError = String(e?.message || e);
     }
@@ -51,13 +53,17 @@ export async function GET(req: NextRequest) {
   debug.failedCalls = debug.diag.filter((d: Diag) => !d.ok).length;
   debug.totalCalls = debug.diag.length;
 
-  // --- Sync time: the newest day that has ANY real metric -----------------
-  let lastSync: string | null = null;
-  for (let i = scored.length - 1; i >= 0; i--) {
-    const d = scored[i];
-    if (d.hrv != null || d.rhr != null || d.sleepMin != null || d.steps != null) {
-      lastSync = d.date;
-      break;
+  // --- Sync time: real clock-time from the latest zone-minute record if we
+  // have one (continuous throughout the day), else fall back to the newest
+  // day that has any real metric (date only, no time available).
+  let lastSync: string | null = typeof lastSyncTime !== "undefined" ? lastSyncTime : null;
+  if (!lastSync) {
+    for (let i = scored.length - 1; i >= 0; i--) {
+      const d = scored[i];
+      if (d.hrv != null || d.rhr != null || d.sleepMin != null || d.steps != null) {
+        lastSync = d.date;
+        break;
+      }
     }
   }
 

@@ -69,7 +69,7 @@ export default function Page() {
     load();
     // Auto-refresh so steps/strain/sync-time stay current without a manual
     // tap. Silent = no loading spinner, so it doesn't flicker mid-read.
-    const id = setInterval(() => load(true), 5 * 60 * 1000);
+    const id = setInterval(() => load(true), 15 * 60 * 1000);
     return () => clearInterval(id);
   }, []);
 

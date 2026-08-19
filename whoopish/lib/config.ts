@@ -44,7 +44,7 @@ export const SCORING = {
   // load = fatBurnMin*1 + cardioMin*2 + peakMin*3 (falls back to AZM total)
   // strain = 21 * (1 - exp(-load / STRAIN_K))
   ZONE_WEIGHTS: { fatBurn: 1.0, cardio: 2.0, peak: 3.0 },
-  STRAIN_K: 65,
+  STRAIN_K: 160,
 
   // --- Daily strain target (drives the target band on the ring) ------------
   // goal = TARGET_MIN + recovery/100 * (TARGET_MAX - TARGET_MIN), band ±2

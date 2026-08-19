@@ -53,28 +53,43 @@ function civil(dateStr: string, end = false) {
 }
 
 async function api(token: string, path: string, diag: Diag[], body?: unknown) {
-  let res: Response;
-  try {
-    res = await fetch(`${BASE}${path}`, {
-      method: body ? "POST" : "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-        ...(body ? { "Content-Type": "application/json" } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-  } catch (e: any) {
-    diag.push({ path, status: 0, ok: false, message: `network error: ${e?.message || e}` });
-    return null;
+  // Retry 429s (rate limit) and 500/503 (transient) with jittered backoff.
+  // Google Health caps per-user-per-minute requests, and a full sweep is
+  // dozens of parallel calls, so a burst can easily trip it briefly.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}${path}`, {
+        method: body ? "POST" : "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+          ...(body ? { "Content-Type": "application/json" } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch (e: any) {
+      diag.push({ path, status: 0, ok: false, message: `network error: ${e?.message || e}` });
+      return null;
+    }
+    if (res.status === 429 || res.status === 500 || res.status === 503) {
+      if (attempt < 2) {
+        // 700ms, then 2000ms, both with +/- 30% jitter to avoid herd retry.
+        const base = attempt === 0 ? 700 : 2000;
+        const wait = base * (0.7 + Math.random() * 0.6);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+    }
+    if (!res.ok) {
+      const text = (await res.text()).slice(0, 400);
+      diag.push({ path, status: res.status, ok: false, message: text });
+      return null;
+    }
+    diag.push({ path, status: res.status, ok: true, message: "ok" });
+    return res.json();
   }
-  if (!res.ok) {
-    const text = (await res.text()).slice(0, 400);
-    diag.push({ path, status: res.status, ok: false, message: text });
-    return null;
-  }
-  diag.push({ path, status: res.status, ok: true, message: "ok" });
-  return res.json();
+  return null;
 }
 
 // dailyRollUp, auto-chunked to respect the API's per-type max range
@@ -110,6 +125,7 @@ async function reconcileSince(
   for (let i = 0; i < 12; i++) {
     const q = new URLSearchParams({
       filter: `${filterField} >= "${start}T00:00:00"`,
+      pageSize: "200",
     });
     if (pageToken) q.set("pageToken", pageToken);
     const j = await api(token, `/users/me/dataTypes/${type}/dataPoints:reconcile?${q}`, diag);
@@ -144,6 +160,7 @@ async function fetchSleep(token: string, start: string, end: string, diag: Diag[
   for (let i = 0; i < 12; i++) {
     const q = new URLSearchParams({
       filter: `sleep.interval.civil_end_time >= "${start}T00:00:00"`,
+      pageSize: "200",
     });
     if (pageToken) q.set("pageToken", pageToken);
     const j = await api(token, `/users/me/dataTypes/${DATA_TYPES.sleep}/dataPoints:reconcile?${q}`, diag);
@@ -180,6 +197,7 @@ async function fetchAzm(token: string, start: string, end: string, diag: Diag[])
   for (let i = 0; i < 40; i++) {
     const q = new URLSearchParams({
       filter: `active_zone_minutes.interval.civil_start_time >= "${start}T00:00:00"`,
+      pageSize: "200",
     });
     if (pageToken) q.set("pageToken", pageToken);
     const j = await api(token, `/users/me/dataTypes/active-zone-minutes/dataPoints:reconcile?${q}`, diag);
@@ -217,6 +235,7 @@ async function fetchSteps(token: string, start: string, end: string, diag: Diag[
   for (let i = 0; i < 60; i++) {
     const q = new URLSearchParams({
       filter: `steps.interval.civil_start_time >= "${start}T00:00:00"`,
+      pageSize: "200",
     });
     if (pageToken) q.set("pageToken", pageToken);
     const j = await api(token, `/users/me/dataTypes/steps/dataPoints:reconcile?${q}`, diag);
@@ -238,7 +257,15 @@ async function fetchSteps(token: string, start: string, end: string, diag: Diag[
   return { byDate, latestEndTime };
 }
 
-export async function fetchDays(token: string, start: string, end: string): Promise<{ days: DayMetrics[]; diag: Diag[]; lastSyncTime: string | null }> {
+
+// Tiny per-instance memo so rapid refreshes (manual + auto) don't re-hit the
+// Google Health API from scratch every time. TTL is short; scoring runs fresh
+// on cached data so the display stays live even without a refetch.
+type CachedResult = { days: DayMetrics[]; diag: Diag[]; lastSyncTime: string | null };
+const RESULT_CACHE = new Map<string, { at: number; result: CachedResult }>();
+const RESULT_TTL_MS = 60 * 1000;
+
+async function _fetchDaysImpl(token: string, start: string, end: string): Promise<{ days: DayMetrics[]; diag: Diag[]; lastSyncTime: string | null }> {
   const diag: Diag[] = [];
   const [sleep, hrv, rhr, resp, spo2, stepsResult, cals, azmResult] = await Promise.all([
     fetchSleep(token, start, end, diag),
@@ -276,4 +303,13 @@ export async function fetchDays(token: string, start: string, end: string): Prom
     });
   }
   return { days, diag, lastSyncTime: latestEndTime };
+}
+
+export async function fetchDays(token: string, start: string, end: string): Promise<{ days: DayMetrics[]; diag: Diag[]; lastSyncTime: string | null }> {
+  const key = `${start}|${end}`;
+  const hit = RESULT_CACHE.get(key);
+  if (hit && Date.now() - hit.at < RESULT_TTL_MS) return hit.result;
+  const result = await _fetchDaysImpl(token, start, end);
+  RESULT_CACHE.set(key, { at: Date.now(), result });
+  return result;
 }

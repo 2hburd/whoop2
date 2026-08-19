@@ -170,6 +170,40 @@ async function fetchSleep(token: string, start: string, end: string, diag: Diag[
   return byDate;
 }
 
+
+// Active Zone Minutes come back as one record PER MINUTE (each with a zone and
+// a value of 1-2), not a daily total — so we sum them per day per zone here.
+async function fetchAzm(token: string, start: string, end: string, diag: Diag[]) {
+  const byDate: Record<string, { fatBurn: number; cardio: number; peak: number; total: number }> = {};
+  let pageToken = "";
+  for (let i = 0; i < 40; i++) {
+    const q = new URLSearchParams({
+      filter: `active_zone_minutes.interval.civil_start_time >= "${start}T00:00:00"`,
+    });
+    if (pageToken) q.set("pageToken", pageToken);
+    const j = await api(token, `/users/me/dataTypes/active-zone-minutes/dataPoints:reconcile?${q}`, diag);
+    if (!j) break;
+    for (const p of j.dataPoints || []) {
+      const a = p.activeZoneMinutes;
+      const d = a?.interval?.civilStartTime?.date;
+      if (!d) continue;
+      const key = `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
+      if (key < start || key > end) continue;
+      const mins = Number(a.activeZoneMinutes || 0);
+      const zone = String(a.heartRateZone || "");
+      const rec = byDate[key] || { fatBurn: 0, cardio: 0, peak: 0, total: 0 };
+      if (zone === "FAT_BURN") rec.fatBurn += mins;
+      else if (zone === "CARDIO") rec.cardio += mins;
+      else if (zone === "PEAK") rec.peak += mins;
+      rec.total += mins; // AZM value already counts cardio/peak minutes double
+      byDate[key] = rec;
+    }
+    pageToken = j.nextPageToken || "";
+    if (!pageToken) break;
+  }
+  return byDate;
+}
+
 export async function fetchDays(token: string, start: string, end: string): Promise<{ days: DayMetrics[]; diag: Diag[] }> {
   const diag: Diag[] = [];
   const [sleep, hrv, rhr, resp, spo2, steps, cals, azm] = await Promise.all([
@@ -180,17 +214,17 @@ export async function fetchDays(token: string, start: string, end: string): Prom
     reconcileSince(token, DATA_TYPES.spo2, "daily_oxygen_saturation.date", start, end, diag),
     dailyRollup(token, DATA_TYPES.steps, start, end, diag, 90),
     dailyRollup(token, DATA_TYPES.calories, start, end, diag, 14),
-    dailyRollup(token, DATA_TYPES.activeMinutes, start, end, diag, 14),
+    fetchAzm(token, start, end, diag),
   ]);
 
   const days: DayMetrics[] = [];
   for (let d = new Date(start + "T00:00:00Z"); ymd(d) <= end; d.setUTCDate(d.getUTCDate() + 1)) {
     const date = ymd(d);
     const a = azm[date];
-    const fatBurn = firstNum(a, ["fatBurnMinutes", "fatBurnMinutesSum", "moderateMinutesSum"]) || 0;
-    const cardio = firstNum(a, ["cardioMinutes", "cardioMinutesSum", "vigorousMinutesSum"]) || 0;
-    const peak = firstNum(a, ["peakMinutes", "peakMinutesSum"]) || 0;
-    const total = firstNum(a, ["activeZoneMinutes", "activeZoneMinutesSum", "minutesSum", "countSum"]) || fatBurn + cardio + peak;
+    const fatBurn = a?.fatBurn || 0;
+    const cardio = a?.cardio || 0;
+    const peak = a?.peak || 0;
+    const total = a?.total || (fatBurn + cardio + peak);
     days.push({
       date,
       sleepMin: sleep[date]?.min ?? null,

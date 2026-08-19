@@ -6,7 +6,10 @@ import { demoDays } from "@/lib/demo";
 
 export const dynamic = "force-dynamic";
 
-const FETCH_DAYS = 120; // 90 for display + 30 warm-up so baselines are ready
+const FETCH_DAYS = 120;
+
+// How many days of real, non-null data before a metric's baseline is trustworthy.
+const BASELINE_READY_DAYS = 14;
 
 export async function GET(req: NextRequest) {
   const end = new Date();
@@ -24,7 +27,6 @@ export async function GET(req: NextRequest) {
   if (rt) {
     try {
       const token = await refreshAccessToken(rt);
-      // dailyRollUp caps ranges at 90 days -> fetch in two chunks
       const mid = new Date(start);
       mid.setUTCDate(mid.getUTCDate() + 60);
       const midNext = new Date(mid);
@@ -37,7 +39,6 @@ export async function GET(req: NextRequest) {
       debug.diag = [...a.diag, ...b.diag];
     } catch (e: any) {
       debug.tokenRefreshError = String(e?.message || e);
-      console.error("Falling back to demo data:", e);
     }
   }
   if (!days) {
@@ -45,10 +46,39 @@ export async function GET(req: NextRequest) {
     days = demoDays(FETCH_DAYS, end);
   }
 
-  const scored = scoreDays(days).slice(-90); // drop warm-up
-  debug.lastRawDay = days.at(-1); // unscored, straight from the API — easiest thing to eyeball
+  const scored = scoreDays(days).slice(-90);
+  debug.lastRawDay = days.at(-1);
   debug.failedCalls = debug.diag.filter((d: Diag) => !d.ok).length;
   debug.totalCalls = debug.diag.length;
 
-  return NextResponse.json({ demo, days: scored, debug });
+  // --- Sync time: the newest day that has ANY real metric -----------------
+  let lastSync: string | null = null;
+  for (let i = scored.length - 1; i >= 0; i--) {
+    const d = scored[i];
+    if (d.hrv != null || d.rhr != null || d.sleepMin != null || d.steps != null) {
+      lastSync = d.date;
+      break;
+    }
+  }
+
+  // --- Baseline readiness: count days of real data per metric, project the
+  // date each baseline becomes trustworthy (needs BASELINE_READY_DAYS). -----
+  const countReal = (key: "hrv" | "rhr" | "sleepMin") =>
+    scored.filter(d => (d as any)[key] != null).length;
+  const projectDate = (have: number) => {
+    if (have >= BASELINE_READY_DAYS) return null; // already ready
+    const remaining = BASELINE_READY_DAYS - have;
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + remaining);
+    return d.toISOString().slice(0, 10);
+  };
+  const baselines = {
+    hrvDays: countReal("hrv"),
+    rhrDays: countReal("rhr"),
+    sleepDays: countReal("sleepMin"),
+    readyDate: projectDate(Math.min(countReal("hrv"), countReal("rhr"))),
+    needDays: BASELINE_READY_DAYS,
+  };
+
+  return NextResponse.json({ demo, days: scored, debug, lastSync, baselines });
 }

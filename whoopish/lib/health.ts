@@ -175,6 +175,7 @@ async function fetchSleep(token: string, start: string, end: string, diag: Diag[
 // a value of 1-2), not a daily total — so we sum them per day per zone here.
 async function fetchAzm(token: string, start: string, end: string, diag: Diag[]) {
   const byDate: Record<string, { fatBurn: number; cardio: number; peak: number; total: number }> = {};
+  let latestEndTime: string | null = null; // real clock-time timestamp, for "last synced"
   let pageToken = "";
   for (let i = 0; i < 40; i++) {
     const q = new URLSearchParams({
@@ -188,6 +189,8 @@ async function fetchAzm(token: string, start: string, end: string, diag: Diag[])
       const d = a?.interval?.civilStartTime?.date;
       if (!d) continue;
       const key = `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
+      const endTime = a?.interval?.endTime;
+      if (endTime && (!latestEndTime || endTime > latestEndTime)) latestEndTime = endTime;
       if (key < start || key > end) continue;
       const mins = Number(a.activeZoneMinutes || 0);
       const zone = String(a.heartRateZone || "");
@@ -201,22 +204,56 @@ async function fetchAzm(token: string, start: string, end: string, diag: Diag[])
     pageToken = j.nextPageToken || "";
     if (!pageToken) break;
   }
-  return byDate;
+  return { byDate, latestEndTime };
 }
 
-export async function fetchDays(token: string, start: string, end: string): Promise<{ days: DayMetrics[]; diag: Diag[] }> {
+
+// Steps come back as one record per sync interval (not a single daily total),
+// so — same as AZM — we sum them per day here to get a genuinely live count.
+async function fetchSteps(token: string, start: string, end: string, diag: Diag[]) {
+  const byDate: Record<string, number> = {};
+  let latestEndTime: string | null = null;
+  let pageToken = "";
+  for (let i = 0; i < 60; i++) {
+    const q = new URLSearchParams({
+      filter: `steps.interval.civil_start_time >= "${start}T00:00:00"`,
+    });
+    if (pageToken) q.set("pageToken", pageToken);
+    const j = await api(token, `/users/me/dataTypes/steps/dataPoints:reconcile?${q}`, diag);
+    if (!j) break;
+    for (const p of j.dataPoints || []) {
+      const s = p.steps;
+      const d = s?.interval?.civilStartTime?.date;
+      if (!d) continue;
+      const key = `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
+      const endTime = s?.interval?.endTime;
+      if (endTime && (!latestEndTime || endTime > latestEndTime)) latestEndTime = endTime;
+      if (key < start || key > end) continue;
+      const count = firstNum(s, ["count", "stepsCount", "value"]) || 0;
+      byDate[key] = (byDate[key] || 0) + count;
+    }
+    pageToken = j.nextPageToken || "";
+    if (!pageToken) break;
+  }
+  return { byDate, latestEndTime };
+}
+
+export async function fetchDays(token: string, start: string, end: string): Promise<{ days: DayMetrics[]; diag: Diag[]; lastSyncTime: string | null }> {
   const diag: Diag[] = [];
-  const [sleep, hrv, rhr, resp, spo2, steps, cals, azm] = await Promise.all([
+  const [sleep, hrv, rhr, resp, spo2, stepsResult, cals, azmResult] = await Promise.all([
     fetchSleep(token, start, end, diag),
     reconcileSince(token, DATA_TYPES.hrv, "daily_heart_rate_variability.date", start, end, diag),
     reconcileSince(token, DATA_TYPES.restingHeartRate, "daily_resting_heart_rate.date", start, end, diag),
     reconcileSince(token, DATA_TYPES.breathingRate, "daily_respiratory_rate.date", start, end, diag),
     reconcileSince(token, DATA_TYPES.spo2, "daily_oxygen_saturation.date", start, end, diag),
-    dailyRollup(token, DATA_TYPES.steps, start, end, diag, 90),
+    fetchSteps(token, start, end, diag),
     dailyRollup(token, DATA_TYPES.calories, start, end, diag, 14),
     fetchAzm(token, start, end, diag),
   ]);
 
+  const azm = azmResult.byDate;
+  const steps = stepsResult.byDate;
+  const latestEndTime = [azmResult.latestEndTime, stepsResult.latestEndTime].filter(Boolean).sort().at(-1) || null;
   const days: DayMetrics[] = [];
   for (let d = new Date(start + "T00:00:00Z"); ymd(d) <= end; d.setUTCDate(d.getUTCDate() + 1)) {
     const date = ymd(d);
@@ -233,10 +270,10 @@ export async function fetchDays(token: string, start: string, end: string): Prom
       rhr: firstNum(rhr[date], ["beatsPerMinute", "beats_per_minute"]),
       respRate: firstNum(resp[date], ["breathsPerMinute", "breaths_per_minute"]),
       spo2: firstNum(spo2[date], ["averagePercentage", "average_percentage"]),
-      steps: firstNum(steps[date], ["countSum", "count"]),
+      steps: steps[date] ?? null,
       calories: firstNum(cals[date], ["kcalSum", "kcal", "caloriesSum"]),
       azm: a ? { fatBurn, cardio, peak, total } : null,
     });
   }
-  return { days, diag };
+  return { days, diag, lastSyncTime: latestEndTime };
 }

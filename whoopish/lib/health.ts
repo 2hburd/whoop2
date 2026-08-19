@@ -143,7 +143,7 @@ async function fetchSleep(token: string, start: string, end: string, diag: Diag[
   let pageToken = "";
   for (let i = 0; i < 12; i++) {
     const q = new URLSearchParams({
-      filter: `sleep.interval.civil_start_time >= "${start}T00:00:00"`,
+      filter: `sleep.interval.civil_end_time >= "${start}T00:00:00"`,
     });
     if (pageToken) q.set("pageToken", pageToken);
     const j = await api(token, `/users/me/dataTypes/${DATA_TYPES.sleep}/dataPoints:reconcile?${q}`, diag);
